@@ -8,6 +8,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument("model_name", type=str, help="model name.", choices=("flan_t5_xl", "flan_t5_xxl", "gpt"))
 args = parser.parse_args()
 
+if args.model_name == "gpt":
+    oner_bm25 = "6"
+    ircot_bm25 = "3"
+else:
+    oner_bm25 = "15"
+    ircot_bm25 = "6"
+
 # Set your file path accordingly
 orig_nq_file = os.path.join("processed_data", "nq", 'test_subsampled.jsonl')
 orig_trivia_file = os.path.join("processed_data", "trivia", 'test_subsampled.jsonl')
@@ -16,19 +23,19 @@ orig_musique_file = os.path.join("processed_data", "musique", 'test_subsampled.j
 orig_hotpotqa_file = os.path.join("processed_data", "hotpotqa", 'test_subsampled.jsonl')
 orig_wikimultihopqa_file = os.path.join("processed_data", "2wikimultihopqa", 'test_subsampled.jsonl')
 
-nq_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_nq____prompt_set_1___bm25_retrieval_count__6___distractor_count__1', 'zero_single_multi_classification__nq_to_nq__test_subsampled.json') 
-trivia_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_trivia____prompt_set_1___bm25_retrieval_count__6___distractor_count__1', 'zero_single_multi_classification__trivia_to_trivia__test_subsampled.json')
-squad_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_squad____prompt_set_1___bm25_retrieval_count__6___distractor_count__1', 'zero_single_multi_classification__squad_to_squad__test_subsampled.json')
-musique_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_musique____prompt_set_1___bm25_retrieval_count__6___distractor_count__1', 'zero_single_multi_classification__musique_to_musique__test_subsampled.json')
-hotpotqa_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_hotpotqa____prompt_set_1___bm25_retrieval_count__6___distractor_count__1', 'zero_single_multi_classification__hotpotqa_to_hotpotqa__test_subsampled.json')
-wikimultihopqa_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_2wikimultihopqa____prompt_set_1___bm25_retrieval_count__6___distractor_count__1', 'zero_single_multi_classification__2wikimultihopqa_to_2wikimultihopqa__test_subsampled.json')
+nq_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_nq____prompt_set_1___bm25_retrieval_count__{ircot_bm25}___distractor_count__1', 'zero_single_multi_classification__nq_to_nq__test_subsampled.json') 
+trivia_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_trivia____prompt_set_1___bm25_retrieval_count__{ircot_bm25}___distractor_count__1', 'zero_single_multi_classification__trivia_to_trivia__test_subsampled.json')
+squad_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_squad____prompt_set_1___bm25_retrieval_count__{ircot_bm25}___distractor_count__1', 'zero_single_multi_classification__squad_to_squad__test_subsampled.json')
+musique_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_musique____prompt_set_1___bm25_retrieval_count__{ircot_bm25}___distractor_count__1', 'zero_single_multi_classification__musique_to_musique__test_subsampled.json')
+hotpotqa_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_hotpotqa____prompt_set_1___bm25_retrieval_count__{ircot_bm25}___distractor_count__1', 'zero_single_multi_classification__hotpotqa_to_hotpotqa__test_subsampled.json')
+wikimultihopqa_multi_file = os.path.join("predictions", "test", f'ircot_qa_{args.model_name}_2wikimultihopqa____prompt_set_1___bm25_retrieval_count__{ircot_bm25}___distractor_count__1', 'zero_single_multi_classification__2wikimultihopqa_to_2wikimultihopqa__test_subsampled.json')
 
-nq_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_nq____prompt_set_1___bm25_retrieval_count__15___distractor_count__1', 'zero_single_multi_classification__nq_to_nq__test_subsampled.json') 
-trivia_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_trivia____prompt_set_1___bm25_retrieval_count__15___distractor_count__1', 'zero_single_multi_classification__trivia_to_trivia__test_subsampled.json')
-squad_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_squad____prompt_set_1___bm25_retrieval_count__15___distractor_count__1', 'zero_single_multi_classification__squad_to_squad__test_subsampled.json')
-musique_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_musique____prompt_set_1___bm25_retrieval_count__15___distractor_count__1', 'zero_single_multi_classification__musique_to_musique__test_subsampled.json')
-hotpotqa_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_hotpotqa____prompt_set_1___bm25_retrieval_count__15___distractor_count__1', 'zero_single_multi_classification__hotpotqa_to_hotpotqa__test_subsampled.json')
-wikimultihopqa_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_2wikimultihopqa____prompt_set_1___bm25_retrieval_count__15___distractor_count__1', 'zero_single_multi_classification__2wikimultihopqa_to_2wikimultihopqa__test_subsampled.json')
+nq_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_nq____prompt_set_1___bm25_retrieval_count__{oner_bm25}___distractor_count__1', 'zero_single_multi_classification__nq_to_nq__test_subsampled.json') 
+trivia_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_trivia____prompt_set_1___bm25_retrieval_count__{oner_bm25}___distractor_count__1', 'zero_single_multi_classification__trivia_to_trivia__test_subsampled.json')
+squad_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_squad____prompt_set_1___bm25_retrieval_count__{oner_bm25}___distractor_count__1', 'zero_single_multi_classification__squad_to_squad__test_subsampled.json')
+musique_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_musique____prompt_set_1___bm25_retrieval_count__{oner_bm25}___distractor_count__1', 'zero_single_multi_classification__musique_to_musique__test_subsampled.json')
+hotpotqa_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_hotpotqa____prompt_set_1___bm25_retrieval_count__{oner_bm25}___distractor_count__1', 'zero_single_multi_classification__hotpotqa_to_hotpotqa__test_subsampled.json')
+wikimultihopqa_one_file = os.path.join("predictions", "test", f'oner_qa_{args.model_name}_2wikimultihopqa____prompt_set_1___bm25_retrieval_count__{oner_bm25}___distractor_count__1', 'zero_single_multi_classification__2wikimultihopqa_to_2wikimultihopqa__test_subsampled.json')
 
 nq_zero_file = os.path.join("predictions", "test", f'nor_qa_{args.model_name}_nq____prompt_set_1', 'zero_single_multi_classification__nq_to_nq__test_subsampled.json') 
 trivia_zero_file = os.path.join("predictions", "test", f'nor_qa_{args.model_name}_trivia____prompt_set_1', 'zero_single_multi_classification__trivia_to_trivia__test_subsampled.json')

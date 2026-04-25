@@ -4,6 +4,14 @@ Instantiates a base config with various HP combinations.
 
 import re
 import os
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 os.environ['TRANSFORMERS_CACHE'] = os.path.dirname(os.getcwd()) + '/cache'
 import copy
 import shutil

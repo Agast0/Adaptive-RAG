@@ -21,7 +21,12 @@ from metrics.answer_support_recall import AnswerSupportRecallMetric
 from metrics.squad_answer_em_f1 import SquadAnswerEmF1Metric
 
 # Set your path accordingly
-base_pred_path = './predictions/classifier/t5-large/flan_t5_xl/epoch/25/2024_04_19/01_53_50/'
+base_pred_path = os.environ.get(
+    'ADAPTIVE_BASE_PRED_PATH',
+    './predictions/classifier/t5-large/flan_t5_xl/epoch/25/2024_04_19/01_53_50/',
+)
+if not base_pred_path.endswith(os.sep):
+    base_pred_path = base_pred_path + os.sep
 
 def normalize_answer(s):
     """Lower text and remove punctuation, articles and extra whitespace."""
@@ -333,7 +338,13 @@ def official_evaluate_by_dicts(data_name):
 lst_data_name = ['musique', 'hotpotqa', '2wikimultihopqa', 'nq', 'trivia', 'squad']
 
 for data_name in ['nq', 'trivia', 'squad']:
-    evaluate_by_dicts(data_name)
+    try:
+        evaluate_by_dicts(data_name)
+    except FileNotFoundError as e:
+        print(f"[skip {data_name}] missing file: {e}")
 
 for data_name in ['musique', 'hotpotqa', '2wikimultihopqa']:
-    official_evaluate_by_dicts(data_name)
+    try:
+        official_evaluate_by_dicts(data_name)
+    except (FileNotFoundError, Exception) as e:
+        print(f"[skip {data_name}] official eval unavailable: {e}")

@@ -3,6 +3,13 @@ import shutil
 import subprocess
 import argparse
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 from lib import (
     get_retriever_address,
     get_llm_server_address,
