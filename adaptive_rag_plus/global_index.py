@@ -433,11 +433,28 @@ class IndexState:
     The state file is the single source of truth for "how far along is the
     build". All on-disk artifacts are sized/truncated according to the
     counters here on resume.
+
+    Two fingerprints are tracked so that embedding-compatible parameter
+    changes (e.g. ``num_clusters`` for k-sweeps) can reuse cached chunk
+    embeddings instead of forcing a full rebuild:
+
+    - ``embedding_fingerprint``: hash of params that affect chunks and
+      chunk embeddings (record set, chunk geometry, embed model). Any
+      mismatch invalidates the chunks/chunk-embeddings cache.
+    - ``downstream_fingerprint``: hash of params that only affect stages
+      after chunk embeddings (clusters, summaries, summary embeddings).
+      A mismatch triggers an auto-reset from the clusters stage while
+      preserving chunk embeddings.
+
+    ``params_fingerprint`` is retained as the combined hash for backwards
+    compatibility with existing on-disk state files.
     """
 
     dataset: str
     stage: str = STAGE_INIT
     params_fingerprint: str = ""
+    embedding_fingerprint: str = ""
+    downstream_fingerprint: str = ""
     params: dict = field(default_factory=dict)
     n_records: int = 0
     n_chunks: int = 0
@@ -461,11 +478,56 @@ class IndexState:
         if not path.exists():
             return None
         data = json.loads(path.read_text())
-        return cls(**data)
+        valid = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        filtered = {k: v for k, v in data.items() if k in valid}
+        return cls(**filtered)
 
     def save(self, path: Path) -> None:
         self.updated_at = time.time()
         _atomic_write_text(path, self.to_json())
+
+
+def _embedding_params_dict(
+    *,
+    records: List[NormalizedRecord],
+    embed_model: str,
+    chunk_chars: int,
+    chunk_overlap: int,
+    embed_batch: int,
+    max_chunks_per_record: Optional[int],
+    max_total_chunks: Optional[int],
+) -> dict:
+    """Params that, when changed, invalidate the chunks/chunk-embeddings cache."""
+    return {
+        "embed_model": embed_model,
+        "chunk_chars": int(chunk_chars),
+        "chunk_overlap": int(chunk_overlap),
+        "embed_batch": int(embed_batch),
+        "max_chunks_per_record": max_chunks_per_record,
+        "max_total_chunks": max_total_chunks,
+        "n_records": len(records),
+        "records_signature": [
+            {"qid": r.qid, "context_len": len(r.context or "")} for r in records
+        ],
+    }
+
+
+def _downstream_params_dict(
+    *,
+    summary_model: str,
+    num_clusters: int,
+    summary_max_tokens: int,
+) -> dict:
+    """Params that only affect post-embedding stages (clusters/summaries/summary-embeddings)."""
+    return {
+        "num_clusters": int(num_clusters),
+        "summary_model": summary_model,
+        "summary_max_tokens": int(summary_max_tokens),
+    }
+
+
+def _hash_dict(d: dict) -> str:
+    return hashlib.sha256(json.dumps(d, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _params_fingerprint(
@@ -480,24 +542,27 @@ def _params_fingerprint(
     embed_batch: int,
     max_chunks_per_record: Optional[int],
     max_total_chunks: Optional[int],
-) -> Tuple[str, dict]:
-    params = {
-        "embed_model": embed_model,
-        "summary_model": summary_model,
-        "chunk_chars": int(chunk_chars),
-        "chunk_overlap": int(chunk_overlap),
-        "num_clusters": int(num_clusters),
-        "summary_max_tokens": int(summary_max_tokens),
-        "embed_batch": int(embed_batch),
-        "max_chunks_per_record": max_chunks_per_record,
-        "max_total_chunks": max_total_chunks,
-        "n_records": len(records),
-        "records_signature": [
-            {"qid": r.qid, "context_len": len(r.context or "")} for r in records
-        ],
-    }
-    h = hashlib.sha256(json.dumps(params, sort_keys=True).encode("utf-8")).hexdigest()
-    return h, params
+) -> Tuple[str, dict, str, str]:
+    """Compute combined + split fingerprints over the build parameters.
+
+    Returns ``(combined_fp, combined_params, embedding_fp, downstream_fp)``.
+    """
+    embedding_params = _embedding_params_dict(
+        records=records,
+        embed_model=embed_model,
+        chunk_chars=chunk_chars,
+        chunk_overlap=chunk_overlap,
+        embed_batch=embed_batch,
+        max_chunks_per_record=max_chunks_per_record,
+        max_total_chunks=max_total_chunks,
+    )
+    downstream_params = _downstream_params_dict(
+        summary_model=summary_model,
+        num_clusters=num_clusters,
+        summary_max_tokens=summary_max_tokens,
+    )
+    params = {**embedding_params, **downstream_params}
+    return _hash_dict(params), params, _hash_dict(embedding_params), _hash_dict(downstream_params)
 
 
 def _index_paths(out_dir: Path) -> Dict[str, Path]:
@@ -626,6 +691,116 @@ def index_build_status(dataset: str, root: Path = DEFAULT_INDEX_ROOT) -> dict:
     return info
 
 
+def index_compatibility(
+    records: List[NormalizedRecord],
+    dataset: str,
+    *,
+    chunk_chars: int = DEFAULT_CHUNK_CHARS,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+    num_clusters: int = DEFAULT_NUM_CLUSTERS,
+    embed_model: str = DEFAULT_EMBED_MODEL,
+    summary_model: str = DEFAULT_SUMMARY_MODEL,
+    summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
+    embed_batch: int = DEFAULT_EMBED_BATCH,
+    max_chunks_per_record: Optional[int] = None,
+    max_total_chunks: Optional[int] = None,
+    root: Path = DEFAULT_INDEX_ROOT,
+) -> dict:
+    """Classify how a future ``build_global_index`` call would treat the cache.
+
+    Returns a dict with keys:
+
+    - ``mode``: one of
+      * ``"no_state"``    -- nothing on disk; full build from scratch.
+      * ``"complete_match"``           -- complete index, params match;
+        will be returned without API calls.
+      * ``"resume_compatible"``        -- partial build with matching
+        params; will resume from last checkpoint.
+      * ``"reuse_chunk_embeddings"``   -- complete or partial index
+        whose embedding params still match but downstream params
+        differ (e.g. ``num_clusters`` changed); the builder will
+        preserve chunk embeddings and rerun clusters/summaries only.
+      * ``"embedding_mismatch"``       -- chunk geometry / embed model /
+        record set differ; the build would refuse without ``force=True``.
+    - ``embedding_match`` / ``downstream_match``: booleans.
+    - ``existing_complete``: whether ``manifest.json`` is present.
+    - ``existing_state_present``: whether ``state.json`` is present.
+
+    This is a lightweight preflight check; it does not call OpenAI and
+    does not modify any files on disk.
+    """
+    out_dir = Path(root) / dataset
+    paths = _index_paths(out_dir)
+    _, _, embedding_fp, downstream_fp = _params_fingerprint(
+        records=records,
+        embed_model=embed_model,
+        summary_model=summary_model,
+        chunk_chars=chunk_chars,
+        chunk_overlap=chunk_overlap,
+        num_clusters=num_clusters,
+        summary_max_tokens=summary_max_tokens,
+        embed_batch=embed_batch,
+        max_chunks_per_record=max_chunks_per_record,
+        max_total_chunks=max_total_chunks,
+    )
+    existing = IndexState.from_path(paths["state"])
+    existing_complete = paths["manifest"].exists()
+    info: dict = {
+        "dataset": dataset,
+        "existing_state_present": existing is not None,
+        "existing_complete": existing_complete,
+    }
+    if existing is None:
+        info.update({
+            "mode": "no_state",
+            "embedding_match": False,
+            "downstream_match": False,
+        })
+        return info
+
+    prev_e = existing.embedding_fingerprint or ""
+    prev_d = existing.downstream_fingerprint or ""
+    if not prev_e or not prev_d:
+        sp = existing.params or {}
+        try:
+            legacy_embedding = {
+                "embed_model": sp.get("embed_model"),
+                "chunk_chars": int(sp.get("chunk_chars", 0)),
+                "chunk_overlap": int(sp.get("chunk_overlap", 0)),
+                "embed_batch": int(sp.get("embed_batch", 0)),
+                "max_chunks_per_record": sp.get("max_chunks_per_record"),
+                "max_total_chunks": sp.get("max_total_chunks"),
+                "n_records": int(sp.get("n_records", 0)),
+                "records_signature": sp.get("records_signature", []),
+            }
+            legacy_downstream = {
+                "num_clusters": int(sp.get("num_clusters", 0)),
+                "summary_model": sp.get("summary_model"),
+                "summary_max_tokens": int(sp.get("summary_max_tokens", 0)),
+            }
+            prev_e = prev_e or _hash_dict(legacy_embedding)
+            prev_d = prev_d or _hash_dict(legacy_downstream)
+        except Exception:
+            pass
+
+    embedding_match = bool(prev_e) and prev_e == embedding_fp
+    downstream_match = bool(prev_d) and prev_d == downstream_fp
+
+    if not embedding_match:
+        mode = "embedding_mismatch"
+    elif embedding_match and downstream_match:
+        mode = "complete_match" if existing_complete else "resume_compatible"
+    else:
+        mode = "reuse_chunk_embeddings"
+
+    info.update({
+        "embedding_match": embedding_match,
+        "downstream_match": downstream_match,
+        "mode": mode,
+    })
+    return info
+
+
 def _load_existing_chunks(path: Path) -> List[dict]:
     out: List[dict] = []
     if not path.exists():
@@ -720,10 +895,15 @@ def _wipe_stage(state: IndexState, paths: Dict[str, Path], stage: str) -> None:
         for k in ("clusters", "summaries", "summary_embeddings"):
             if paths[k].exists():
                 paths[k].unlink()
-        state.stage = STAGE_CHUNK_EMBED  # will resume->complete chunk_embed then go on
-        if state.n_chunk_embedded == state.n_chunks and state.n_chunks > 0:
-            state.stage = STAGE_CHUNKS_DONE  # ready for re-cluster
-            # actually we want to allow re-cluster: bump to a state that triggers cluster
+        # Land in a stage that deterministically triggers re-cluster on
+        # the next ``build_global_index`` invocation. If chunk embeddings
+        # are complete we go to STAGE_CLUSTERS_DONE (the cluster stage
+        # check below recomputes when ``n_clusters_actual is None``).
+        # Otherwise we resume the chunk-embedding loop first.
+        if state.n_chunks > 0 and state.n_chunk_embedded == state.n_chunks:
+            state.stage = STAGE_CLUSTERS_DONE
+        else:
+            state.stage = STAGE_CHUNK_EMBED
         state.n_clusters_actual = None
         state.n_summaries_done = 0
         state.n_summary_embedded = 0
@@ -797,7 +977,7 @@ def build_global_index(
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = _index_paths(out_dir)
 
-    fingerprint, params = _params_fingerprint(
+    fingerprint, params, embedding_fp, downstream_fp = _params_fingerprint(
         records=records,
         embed_model=embed_model,
         summary_model=summary_model,
@@ -812,18 +992,42 @@ def build_global_index(
 
     existing_state = IndexState.from_path(paths["state"])
 
-    # Quick-load path: complete index, no rebuild requested, fingerprint matches.
-    if not force and rebuild_stage is None and index_exists(dataset, root):
-        if existing_state is None or existing_state.params_fingerprint == fingerprint:
-            logger.info("Reusing cached global index at %s", out_dir)
-            return GlobalIndex.load(dataset, root=root)
-        raise RuntimeError(
-            f"Cached index for {dataset!r} was built with different parameters "
-            f"(fingerprint mismatch). Pass force=True to rebuild or use matching "
-            f"parameters. Existing params: {existing_state.params}; requested: {params}"
-        )
+    def _state_fps(s: IndexState) -> Tuple[str, str]:
+        """Return (embedding_fp, downstream_fp) for an existing state.
+
+        Backwards-compat: older state files only carried the combined
+        ``params_fingerprint`` and the unsplit ``params`` dict. In that
+        case we recompute the split fingerprints from those params so we
+        can safely apply the new compatibility rules.
+        """
+        e_fp = s.embedding_fingerprint or ""
+        d_fp = s.downstream_fingerprint or ""
+        if e_fp and d_fp:
+            return e_fp, d_fp
+        sp = s.params or {}
+        try:
+            legacy_embedding = {
+                "embed_model": sp.get("embed_model"),
+                "chunk_chars": int(sp.get("chunk_chars", 0)),
+                "chunk_overlap": int(sp.get("chunk_overlap", 0)),
+                "embed_batch": int(sp.get("embed_batch", 0)),
+                "max_chunks_per_record": sp.get("max_chunks_per_record"),
+                "max_total_chunks": sp.get("max_total_chunks"),
+                "n_records": int(sp.get("n_records", 0)),
+                "records_signature": sp.get("records_signature", []),
+            }
+            legacy_downstream = {
+                "num_clusters": int(sp.get("num_clusters", 0)),
+                "summary_model": sp.get("summary_model"),
+                "summary_max_tokens": int(sp.get("summary_max_tokens", 0)),
+            }
+            return _hash_dict(legacy_embedding), _hash_dict(legacy_downstream)
+        except Exception:
+            return "", ""
 
     state = existing_state
+    auto_reset_clusters = False
+
     if force:
         logger.info("force=True -> wiping %s", out_dir)
         for k in ("chunks", "chunk_embeddings", "clusters", "summaries",
@@ -831,25 +1035,74 @@ def build_global_index(
             if paths[k].exists():
                 paths[k].unlink()
         state = None
+        existing_state = None
 
-    if state is not None and state.params_fingerprint and state.params_fingerprint != fingerprint:
-        raise RuntimeError(
-            f"Cached index for {dataset!r} was built with different parameters "
-            f"(fingerprint mismatch). Pass force=True to rebuild or use "
-            f"matching parameters. Existing params: {state.params}; "
-            f"requested: {params}"
-        )
+    if existing_state is not None and not force:
+        prev_embedding_fp, prev_downstream_fp = _state_fps(existing_state)
+        embedding_match = (prev_embedding_fp == embedding_fp) if prev_embedding_fp else False
+        downstream_match = (prev_downstream_fp == downstream_fp) if prev_downstream_fp else False
+
+        if not embedding_match:
+            raise RuntimeError(
+                f"Cached index for {dataset!r} was built with different "
+                f"embedding-affecting parameters (chunk geometry / embed model "
+                f"/ record set). Pass force=True to rebuild from scratch. "
+                f"Existing params: {existing_state.params}; requested: {params}"
+            )
+
+        if not downstream_match and rebuild_stage is None:
+            logger.info(
+                "embedding-compatible parameter change detected for %r "
+                "(num_clusters/summary params differ); reusing chunk "
+                "embeddings and rebuilding from clusters stage.",
+                dataset,
+            )
+            auto_reset_clusters = True
+
+    # Quick-load path: complete index, no rebuild requested, fingerprints match fully.
+    if (
+        not force
+        and rebuild_stage is None
+        and not auto_reset_clusters
+        and index_exists(dataset, root)
+    ):
+        if existing_state is None:
+            logger.info("Reusing cached global index at %s (no state.json)", out_dir)
+            return GlobalIndex.load(dataset, root=root)
+        prev_embedding_fp, prev_downstream_fp = _state_fps(existing_state)
+        if prev_embedding_fp == embedding_fp and prev_downstream_fp == downstream_fp:
+            logger.info("Reusing cached global index at %s", out_dir)
+            return GlobalIndex.load(dataset, root=root)
+        # Fall through: split-fingerprint logic above will have set
+        # ``auto_reset_clusters`` or raised already; this branch is a guard.
 
     if state is None:
         state = IndexState(
             dataset=dataset,
             stage=STAGE_INIT,
             params_fingerprint=fingerprint,
+            embedding_fingerprint=embedding_fp,
+            downstream_fingerprint=downstream_fp,
             params=params,
             n_records=len(records),
             n_clusters_target=int(num_clusters),
             started_at=time.time(),
         )
+        state.save(paths["state"])
+    else:
+        # Refresh fingerprints/params on the existing state so subsequent
+        # writes carry the requested values. This is safe because we have
+        # already validated embedding compatibility above.
+        state.params_fingerprint = fingerprint
+        state.embedding_fingerprint = embedding_fp
+        state.downstream_fingerprint = downstream_fp
+        state.params = params
+        state.n_clusters_target = int(num_clusters)
+
+    if auto_reset_clusters:
+        _wipe_stage(state, paths, "clusters")
+        if paths["manifest"].exists():
+            paths["manifest"].unlink()
         state.save(paths["state"])
 
     if rebuild_stage is not None:

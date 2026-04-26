@@ -143,6 +143,42 @@ def _build_one(
 
     _emit_status(dataset, root)
 
+    if not args.force and args.rebuild_stage is None:
+        compat = global_index.index_compatibility(
+            recs, dataset,
+            chunk_chars=args.chunk_chars,
+            chunk_overlap=args.chunk_overlap,
+            num_clusters=args.num_clusters,
+            embed_model=args.embed_model,
+            summary_model=args.summary_model,
+            summary_max_tokens=args.summary_max_tokens,
+            embed_batch=args.embed_batch,
+            max_chunks_per_record=args.max_chunks_per_record,
+            max_total_chunks=args.max_total_chunks,
+            root=root,
+        )
+        mode = compat.get("mode")
+        if mode == "no_state":
+            log(f"  preflight[{dataset}]: no cached state -> FULL BUILD from scratch")
+        elif mode == "complete_match":
+            log(f"  preflight[{dataset}]: cache HIT -> reusing complete index, no OpenAI calls")
+        elif mode == "resume_compatible":
+            log(f"  preflight[{dataset}]: partial cache, params match -> RESUME from last checkpoint")
+        elif mode == "reuse_chunk_embeddings":
+            log(f"  preflight[{dataset}]: embedding-compatible parameter change "
+                f"(num_clusters/summary params differ) -> REUSING chunk embeddings, "
+                f"rebuilding from clusters stage")
+        elif mode == "embedding_mismatch":
+            log(f"  preflight[{dataset}]: embedding-affecting parameters changed "
+                f"(chunks/embed model/records); build will FAIL without --force")
+        else:
+            log(f"  preflight[{dataset}]: mode={mode}")
+    elif args.force:
+        log(f"  preflight[{dataset}]: --force -> FULL REBUILD (any cached chunk embeddings will be discarded)")
+    else:
+        log(f"  preflight[{dataset}]: --rebuild-stage={args.rebuild_stage} "
+            f"-> wiping that stage (and onwards) and resuming")
+
     global_index.build_global_index(
         recs, dataset,
         chunk_chars=args.chunk_chars,

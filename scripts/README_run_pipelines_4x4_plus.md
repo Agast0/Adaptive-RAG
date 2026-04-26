@@ -83,10 +83,44 @@ python scripts/build_longbench_index.py --rebuild-stage summaries
 Valid `--rebuild-stage` values: `chunks`, `chunk_embeddings`,
 `clusters`, `summaries`, `summary_embeddings`.
 
-The indexer also enforces a hyper-parameter fingerprint — re-running
-with different `--chunk-chars`, `--num-clusters`, or models against a
-cached build aborts with a clear "fingerprint mismatch" error, telling
-you to either match the params or pass `--force`.
+#### Hyper-parameter compatibility (split fingerprints)
+
+The indexer tracks two fingerprints over the build parameters and
+applies different policies depending on which one changes:
+
+| Parameter family | Fingerprint | Behavior on change |
+| --- | --- | --- |
+| `--chunk-chars`, `--chunk-overlap`, `--embed-model`, record set, `--max-chunks-per-record`, `--max-total-chunks`, `--embed-batch` | **embedding** | Hard fail with a "embedding-affecting parameters changed" error. Use `--force` to rebuild from scratch. |
+| `--num-clusters`, `--summary-model`, `--summary-max-tokens` | **downstream** | **Auto-reuse**: cached `chunks.jsonl` and `chunk_embeddings.npy` are kept; only clusters, summaries, and summary embeddings are recomputed. |
+
+This means k-sweeps over `--num-clusters` are cheap: chunk embedding
+cost (the dominant API cost for large LongBench builds) is paid once.
+
+#### k-sweep workflow
+
+```bash
+# 1. First full build at k=64 -- this pays the chunk-embedding cost once.
+python scripts/build_longbench_index.py --num-clusters 64
+
+# 2. Sweep k=96 -- preflight will report:
+#       embedding-compatible parameter change ... -> REUSING chunk
+#       embeddings, rebuilding from clusters stage
+#    No chunk-embedding API calls; only cluster / summarize / summary-embed run.
+python scripts/build_longbench_index.py --num-clusters 96
+
+# 3. Sweep k=128 -- same fast path.
+python scripts/build_longbench_index.py --num-clusters 128
+```
+
+When you change something embedding-affecting (e.g. `--chunk-chars` or
+`--embed-model`), the preflight surfaces:
+
+```
+preflight[gov_report]: embedding-affecting parameters changed
+  (chunks/embed model/records); build will FAIL without --force
+```
+
+Pass `--force` to wipe and rebuild from scratch in that case.
 
 ### Step 2 — Run the orchestrator
 
@@ -277,11 +311,15 @@ the test slice is the only set ever scored.
   attempts) inside the indexer and inference paths. If you hit
   per-minute caps, run the indexer with
   `--inter-request-pause 0.5` (or higher).
-* `Cached index ... fingerprint mismatch`: you changed
-  `--chunk-chars`, `--num-clusters`, an embedding model, or the
-  record set since the last build. Either restore the original
-  values or rebuild with
-  `python scripts/build_longbench_index.py --dataset <ds> --force`.
+* `embedding-affecting parameters changed` / `Cached index ... was
+  built with different embedding-affecting parameters`: you changed
+  `--chunk-chars`, `--chunk-overlap`, `--embed-model`, or the record
+  set since the last build. Either restore the original values or
+  rebuild with `python scripts/build_longbench_index.py --dataset <ds>
+  --force` (this is a full rebuild — chunk embeddings will be
+  recomputed). Pure `--num-clusters` / summary-param changes do **not**
+  raise this error; they reuse chunk embeddings automatically (see
+  *k-sweep workflow* above).
 * Partial-state recovery (e.g. one stage looks corrupt): use
   `--rebuild-stage chunk_embeddings|summaries|summary_embeddings`
   to drop only that stage and resume.
