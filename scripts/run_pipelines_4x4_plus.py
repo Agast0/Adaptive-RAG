@@ -269,7 +269,7 @@ def _qa_acc_hotpot_official(prediction_file: Path) -> Tuple[float, int]:
     rel_out = os.path.join("..", "..", str(out_path.relative_to(REPO_ROOT)))
     cmd = (
         f"cd official_evaluation/hotpotqa ; "
-        f"python hotpot_evaluate_v1.py {rel_pr} {rel_gt} > {rel_out}"
+        f"{sys.executable} hotpot_evaluate_v1.py {rel_pr} {rel_gt} > {rel_out}"
     )
     rc = subprocess.call(cmd, shell=True, cwd=str(REPO_ROOT))
     if rc != 0 or not out_path.exists():
@@ -357,10 +357,12 @@ def run_all_d_pipelines(
 
     for ds in D_DATASETS:
         records = d_records_by_dataset[ds]
-        # Indexing is no longer performed inline. The index must already
-        # have been built (and any retries already absorbed) by:
-        #   python scripts/build_longbench_index.py [--dataset <ds>]
-        # We only LOAD the cached, fully-complete index here.
+        out_dir = d_pipeline_dir("global_qa", ds)
+        preds_file = out_dir / "predictions.jsonl"
+        if skip_existing and _has_complete_output(out_dir, len(records)):
+            log(f"  reuse: global_qa on {ds} ({preds_file.relative_to(REPO_ROOT)})")
+            out_paths["global_qa"][ds] = out_dir
+            continue
         if not global_index.index_exists(ds):
             raise RuntimeError(
                 f"Global index for {ds!r} not found. Build it first with:\n"
@@ -370,7 +372,6 @@ def run_all_d_pipelines(
         index = global_index.GlobalIndex.load(ds)
         log(f"  loaded prebuilt index for {ds}: chunks={index.manifest.n_chunks} "
             f"clusters={index.manifest.n_clusters}")
-        # Sanity-check the index covers every test record's qid.
         index_qids = {c.get("source_qid") for c in index.chunks}
         missing = [r.qid for r in records if r.qid not in index_qids]
         if missing:
@@ -379,17 +380,12 @@ def run_all_d_pipelines(
                 f"record(s) (e.g. {missing[:3]}). Re-run scripts/build_longbench_index.py "
                 f"so that every test qid is covered (defaults index all 200 records)."
             )
-        out_dir = d_pipeline_dir("global_qa", ds)
-        preds_file = out_dir / "predictions.jsonl"
-        if skip_existing and _has_complete_output(out_dir, len(records)):
-            log(f"  reuse: global_qa on {ds} ({preds_file.relative_to(REPO_ROOT)})")
-        else:
-            log(f"  run  : global_qa on {ds} -> {out_dir.relative_to(REPO_ROOT)}")
-            global_inference.run_global_pipeline_for_dataset(
-                records, index, out_dir,
-                embed_model=embed_model, gen_model=gen_model,
-                gen_max_tokens=gen_max_tokens,
-            )
+        log(f"  run  : global_qa on {ds} -> {out_dir.relative_to(REPO_ROOT)}")
+        global_inference.run_global_pipeline_for_dataset(
+            records, index, out_dir,
+            embed_model=embed_model, gen_model=gen_model,
+            gen_max_tokens=gen_max_tokens,
+        )
         out_paths["global_qa"][ds] = out_dir
 
     return out_paths
@@ -426,7 +422,7 @@ def classifier_sweep_plus(
         log(f"  >>> training epoch={ep} -> {ep_out.relative_to(REPO_ROOT)}")
         t0 = time.time()
         run([
-            "python", "run_classifier_plus.py",
+            sys.executable, "run_classifier_plus.py",
             "--model_name_or_path", base_model,
             "--train_file", train_file,
             "--question_column", "question",
@@ -446,7 +442,7 @@ def classifier_sweep_plus(
         valid_dir = ep_out / "valid"
         valid_dir.mkdir(exist_ok=True)
         run([
-            "python", "run_classifier_plus.py",
+            sys.executable, "run_classifier_plus.py",
             "--model_name_or_path", str(ep_out),
             "--validation_file", valid_file,
             "--question_column", "question",
@@ -466,7 +462,7 @@ def classifier_sweep_plus(
         predict_dir = ep_out / "predict"
         predict_dir.mkdir(exist_ok=True)
         run([
-            "python", "run_classifier_plus.py",
+            sys.executable, "run_classifier_plus.py",
             "--model_name_or_path", str(ep_out),
             "--validation_file", predict_file,
             "--question_column", "question",
@@ -507,7 +503,7 @@ def run_postprocess_plus(best_predict: Path) -> Path:
     section("4-way postprocess (route A/B/C/D to per-dataset adaptive predictions)")
     rel = best_predict.relative_to(REPO_ROOT)
     run([
-        "python", "classifier/postprocess/predict_complexity_on_classification_results_plus.py",
+        sys.executable, "classifier/postprocess/predict_complexity_on_classification_results_plus.py",
         "gpt",
         "--classification_result_file", str(REPO_ROOT / rel),
     ], cwd=REPO_ROOT)
@@ -617,20 +613,24 @@ def run_3way_classifier_on_d_test(
 ) -> Path:
     """Run the existing 3-way classifier on the D test slice and return the
     path to its ``dict_id_pred_results.json``."""
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     classifier_dir = REPO_ROOT / "classifier"
     predict_input = out_dir / "d_predict.json"
     n = _build_d_predict_file(d_test_qids_per_dataset, predict_input)
-    log(f"  3-way D predict file: {predict_input.relative_to(REPO_ROOT)} (n={n})")
+    try:
+        rel_for_log = predict_input.relative_to(REPO_ROOT)
+    except ValueError:
+        rel_for_log = predict_input
+    log(f"  3-way D predict file: {rel_for_log} (n={n})")
 
     rel_input = os.path.relpath(predict_input, classifier_dir)
     rel_ckpt = os.path.relpath(checkpoint_dir, classifier_dir)
     rel_out = os.path.relpath(out_dir, classifier_dir)
 
     run([
-        "python", "run_classifier.py",
+        sys.executable, "run_classifier.py",
         "--model_name_or_path", rel_ckpt,
         "--validation_file", rel_input,
         "--question_column", "question",
@@ -999,7 +999,7 @@ def _qa_acc_hotpot_official_inline(id_to_pred: Dict[str, str]) -> Tuple[float, i
     rel_out = os.path.join("..", "..", str(out_path.relative_to(REPO_ROOT)))
     cmd = (
         f"cd official_evaluation/hotpotqa ; "
-        f"python hotpot_evaluate_v1.py {rel_pr} {rel_gt} > {rel_out}"
+        f"{sys.executable} hotpot_evaluate_v1.py {rel_pr} {rel_gt} > {rel_out}"
     )
     rc = subprocess.call(cmd, shell=True, cwd=str(REPO_ROOT))
     if rc != 0 or not out_path.exists():
@@ -1051,11 +1051,19 @@ def _adaptive_step_time(
     return (total_step / n) if n else None, (total_time / n) if n else None
 
 
-def collect_adaptive_d_metrics(adaptive_root: Path) -> Dict[str, dict]:
+def collect_adaptive_d_metrics(
+    adaptive_root: Path,
+    d_paths: Optional[Dict[str, Dict[str, Path]]] = None,
+) -> Dict[str, dict]:
     """Adaptive metrics for class-D columns: ROUGE-L from per-dataset
     adaptive prediction files (which deterministically equal the global
-    pipeline output when classifier routes D correctly)."""
+    pipeline output when classifier routes D correctly).
+
+    When ``d_paths`` is provided, also computes per-qid Step/Time by
+    reading the routed pipeline's ``traces.jsonl`` and averaging
+    latencies, mirroring the 3-way row's implementation."""
     per_d: Dict[str, dict] = {}
+    label_to_pipeline = {"A": "nor_qa", "B": "oner_qa", "C": "ircot_qa", "D": "global_qa"}
     for ds in D_DATASETS:
         ds_pred_file = adaptive_root / ds / f"{ds}.json"
         opt_file = adaptive_root / ds / f"{ds}_option.json"
@@ -1074,16 +1082,42 @@ def collect_adaptive_d_metrics(adaptive_root: Path) -> Dict[str, dict]:
             pairs.append((pred or "", refs))
         rouge_l = evaluation.compute_rouge_l_for_pairs(pairs)
         opts = json.loads(opt_file.read_text()) if opt_file.exists() else {}
-        steps = [float(v.get("stepNum", 0)) for v in opts.values()]
-        avg_step = (sum(steps) / len(steps)) if steps else None
+
+        avg_time: Optional[float] = None
+        if d_paths is not None and opts:
+            baseline_traces: Dict[str, Dict[str, Tuple[float, float]]] = {}
+            for pipe in ("nor_qa", "oner_qa", "ircot_qa", "global_qa"):
+                pipe_dir = d_paths.get(pipe, {}).get(ds)
+                if pipe_dir is not None and (pipe_dir / "traces.jsonl").exists():
+                    baseline_traces[pipe] = _d_pipeline_trace_to_qid_step_time(pipe_dir)
+            steps_t: List[float] = []
+            times: List[float] = []
+            for qid, info in opts.items():
+                opt = info.get("option")
+                pipe = label_to_pipeline.get(opt)
+                if pipe is None or pipe not in baseline_traces:
+                    continue
+                step, lat = baseline_traces[pipe].get(qid, (0.0, 0.0))
+                steps_t.append(step)
+                times.append(lat)
+            avg_step = (sum(steps_t) / len(steps_t)) if steps_t else None
+            avg_time = (sum(times) / len(times)) if times else None
+        else:
+            steps_o = [float(v.get("stepNum", 0)) for v in opts.values()]
+            avg_step = (sum(steps_o) / len(steps_o)) if steps_o else None
         per_d[ds] = {
             "ROUGE-L": rouge_l,
             "Step": avg_step,
-            "Time": None,  # adaptive D time captured below from D pipeline traces if available
+            "Time": avg_time,
             "count": len(id_to_pred),
             "_provenance": {
                 "predictions_file": str(ds_pred_file.relative_to(REPO_ROOT)),
                 "option_file": str(opt_file.relative_to(REPO_ROOT)),
+                "step_time_source": (
+                    "from D pipeline traces.jsonl, weighted by routed option (A/B/C/D)"
+                    if d_paths is not None else
+                    "stepNum from option file; time not available without d_paths"
+                ),
             },
         }
     out = {"_per_d": per_d, "longbench": evaluation.aggregate_longbench(per_d)}
@@ -1162,7 +1196,7 @@ def main() -> int:
     if args.num_clusters is None:
         args.num_clusters = 4 if mode == "smoke" else 8
 
-    out_dir = Path(args.out_dir) if args.out_dir else REPO_ROOT / "reports" / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_plus_{mode}"
+    out_dir = (Path(args.out_dir) if args.out_dir else REPO_ROOT / "reports" / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_plus_{mode}").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     section(f"AdaptiveRAG+ orchestration ({mode}) -> {out_dir}")
 
@@ -1178,7 +1212,17 @@ def main() -> int:
     section("Phase 0: preflight checks (LongBench data + prebuilt indexes)")
     longbench.download_longbench_jsonl("gov_report")
     longbench.download_longbench_jsonl("qmsum")
-    missing_indexes = [ds for ds in D_DATASETS if not global_index.index_exists(ds)]
+    missing_indexes = []
+    for ds in D_DATASETS:
+        if global_index.index_exists(ds):
+            continue
+        ds_global_dir = d_pipeline_dir("global_qa", ds)
+        preds = ds_global_dir / "predictions.jsonl"
+        traces = ds_global_dir / "traces.jsonl"
+        if args.skip_existing and preds.exists() and traces.exists():
+            log(f"  index[{ds}] missing but reusing existing global_qa outputs at {ds_global_dir.relative_to(REPO_ROOT)}")
+            continue
+        missing_indexes.append(ds)
     if missing_indexes:
         cmd = "python scripts/build_longbench_index.py"
         if missing_indexes != D_DATASETS:
@@ -1194,6 +1238,9 @@ def main() -> int:
             + "Run with --status to inspect progress."
         )
     for ds in D_DATASETS:
+        if not global_index.index_exists(ds):
+            log(f"  index[{ds}] (skipped: reusing existing global_qa outputs)")
+            continue
         st = global_index.index_build_status(ds)
         log(f"  index[{ds}] OK: chunks={st.get('n_chunks')} clusters={st.get('n_clusters_actual')}")
 
@@ -1300,7 +1347,7 @@ def main() -> int:
     qa_baseline_metrics = collect_qa_baseline_metrics()
     d_metrics_per_pipe = collect_d_metrics(d_paths)
     adaptive_qa_metrics = collect_adaptive_qa_metrics(adaptive_root, d_paths)
-    adaptive_d_metrics = collect_adaptive_d_metrics(adaptive_root)
+    adaptive_d_metrics = collect_adaptive_d_metrics(adaptive_root, d_paths)
 
     if adaptive_root_3way is not None:
         adaptive_rag_3way_qa = collect_adaptive_rag_3way_qa_metrics(adaptive_root_3way, d_paths)
