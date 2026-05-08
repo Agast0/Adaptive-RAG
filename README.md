@@ -11,99 +11,178 @@ We are so grateful that our Adaptive-RAG is featured in LlamaIndex and LangChain
 </div>
 Retrieval-Augmented Large Language Models (LLMs), which incorporate the non-parametric knowledge from external knowledge bases into LLMs, have emerged as a promising approach to enhancing response accuracy in several tasks, such as Question-Answering (QA). However, even though there are various approaches dealing with queries of different complexities, they either handle simple queries with unnecessary computational overhead or fail to adequately address complex multi-step queries; yet, not all user requests fall into only one of the simple or complex categories. In this work, we propose a novel adaptive QA framework that can dynamically select the most suitable strategy for (retrieval-augmented) LLMs from the simplest to the most sophisticated ones based on the query complexity. Also, this selection process is operationalized with a classifier, which is a smaller LM trained to predict the complexity level of incoming queries with automatically collected labels, obtained from actual predicted outcomes of models and inherent inductive biases in datasets. This approach offers a balanced strategy, seamlessly adapting between the iterative and single-step retrieval-augmented LLMs, as well as the no-retrieval methods, in response to a range of query complexities. We validate our model on a set of open-domain QA datasets, covering multiple query complexities, and show that ours enhances the overall efficiency and accuracy of QA systems, compared to relevant baselines including the adaptive retrieval approaches.
 
-## Installation
-The first step (to run our Adaptive-RAG) is to create a conda environment as follows:
+## What’s in this repo
+
+There are **two main ways to run code**:
+
+- **NAACL 2024 (original Adaptive-RAG)**: reproduce the paper pipeline on the single-hop and multi-hop QA datasets using three retrieval strategies (multi/single/zero), then train a 3-way query-complexity classifier, and evaluate Adaptive-RAG.
+- **AdaptiveRAG+ (extended orchestrator)**: run a newer end-to-end orchestrator (`scripts/run_pipelines_4x4_plus.py`) that adds a **4-way** classifier and a **global retrieval** pipeline for LongBench class-D (requires a prebuilt, resumable index via `scripts/build_longbench_index.py`).
+
+If you’re not sure where to start, skim **Quickstart** below and then follow either **Original pipeline (paper)** or **AdaptiveRAG+ pipeline**.
+
+## Requirements
+
+### System
+
+- **Python**: 3.8 (repo tooling is configured for `py38`).
+- **OS**: Linux or macOS.
+- **Optional GPU**: recommended for running FLAN-T5 (`llm_server` loads models with `load_in_8bit=True` and expects CUDA).
+- **Elasticsearch**: required for the retriever used by `retriever_server`.
+
+### API keys / environment variables
+
+Some scripts will call OpenAI when using `MODEL=gpt` and/or when building LongBench global indexes (AdaptiveRAG+).
+
+- **`OPENAI_API_KEY`**: required if you use any OpenAI-backed path.
+- **`.env` support**: some scripts attempt to load `./.env` if present.
+
+Create `./.env` (optional but recommended):
+
 ```bash
-$ conda create -n adaptiverag python=3.8
-$ conda activate adaptiverag
-$ pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
-$ pip install -r requirements.txt
+OPENAI_API_KEY=your_key_here
 ```
+
+## Installation
+
+The simplest setup is a conda env + pip install.
+
+```bash
+conda create -n adaptiverag python=3.8 -y
+conda activate adaptiverag
+pip install -r requirements.txt
+```
+
+### Notes on PyTorch
+
+The repo’s `requirements.txt` allows `torch<2.0`. Install the right PyTorch for your machine (CPU or your CUDA version) following the official instructions, then install the rest of the requirements.
+
+Example (CUDA 11.7, as used in the original instructions):
+
+```bash
+pip install torch==1.13.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+pip install -r requirements.txt
+```
+
+## Installation
+This section is kept for backwards compatibility with the paper instructions; see the updated **Installation** section above for the recommended flow.
 
 ## Prepare Retriever Server
-After installing the conda environment, you should setup the retriever server as follows:
+After installing the environment, setup Elasticsearch and the retriever server.
+
+### 1) Start Elasticsearch
+
+You need an Elasticsearch server reachable at `http://localhost:9200`.
+
+#### Option A: Download a tarball (Linux example)
 ```bash
-$ wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.10.2-linux-x86_64.tar.gz
-$ wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.10.2-linux-x86_64.tar.gz.sha512
-$ shasum -a 512 -c elasticsearch-7.10.2-linux-x86_64.tar.gz.sha512
-$ tar -xzf elasticsearch-7.10.2-linux-x86_64.tar.gz
-$ cd elasticsearch-7.10.2/
-$ ./bin/elasticsearch # start the server
-# pkill -f elasticsearch # to stop the server
+wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.10.2-linux-x86_64.tar.gz
+wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.10.2-linux-x86_64.tar.gz.sha512
+shasum -a 512 -c elasticsearch-7.10.2-linux-x86_64.tar.gz.sha512
+tar -xzf elasticsearch-7.10.2-linux-x86_64.tar.gz
+cd elasticsearch-7.10.2/
+./bin/elasticsearch  # start the server
+# pkill -f elasticsearch  # stop the server
 ```
 
-Start the elasticsearch server on port 9200 (default), and then start the retriever server as shown below.
+#### Option B: Docker (recommended on macOS)
+
+```bash
+docker run --rm -p 9200:9200 -p 9300:9300 \
+  -e "discovery.type=single-node" \
+  -e "xpack.security.enabled=false" \
+  docker.elastic.co/elasticsearch/elasticsearch:7.10.2
+```
+
+### 2) Start the retriever server
+
+With Elasticsearch running on port 9200 (default), start the retriever API:
+
 ```bash
 uvicorn serve:app --port 8000 --app-dir retriever_server
 ```
 
+You can sanity check:
+
+```bash
+curl http://localhost:8000/
+```
+
+## Prepare datasets and build retrieval indexes
+
+You can either use the provided archives (`processed_data.tar.gz`, `predictions.tar.gz`, `data.tar.gz`) or download/build everything yourself.
+
+### Multi-hop datasets
+
+You can download multi-hop datasets (MuSiQue, HotpotQA, and 2WikiMultiHopQA) from https://github.com/StonyBrookNLP/ircot.
 
 ## Datasets
-* You can download multi-hop datasets (MuSiQue, HotpotQA, and 2WikiMultiHopQA) from https://github.com/StonyBrookNLP/ircot.
 ```bash
 # Download the preprocessed datasets for the test set.
-$ bash ./download/processed_data.sh
+bash ./download/processed_data.sh
 # Prepare the dev set, which will be used for training our query complexity classfier.
-$ bash ./download/raw_data.sh
-$ python processing_scripts/subsample_dataset_and_remap_paras.py musique dev_diff_size 500
-$ python processing_scripts/subsample_dataset_and_remap_paras.py hotpotqa dev_diff_size 500
-$ python processing_scripts/subsample_dataset_and_remap_paras.py 2wikimultihopqa dev_diff_size 500
+bash ./download/raw_data.sh
+python processing_scripts/subsample_dataset_and_remap_paras.py musique dev_diff_size 500
+python processing_scripts/subsample_dataset_and_remap_paras.py hotpotqa dev_diff_size 500
+python processing_scripts/subsample_dataset_and_remap_paras.py 2wikimultihopqa dev_diff_size 500
 
 # Build index
 python retriever_server/build_index.py {dataset_name} # hotpotqa, 2wikimultihopqa, musique
 ```
 
-* You can download single-hop datasets (Natural Question, TriviaQA, and SQuAD) from https://github.com/facebookresearch/DPR/blob/main/dpr/data/download_data.py.
+### Single-hop datasets
+
+You can download single-hop datasets (Natural Question, TriviaQA, and SQuAD) from https://github.com/facebookresearch/DPR/blob/main/dpr/data/download_data.py.
+
 ```bash
 # Download Natural Question
-$ mkdir -p raw_data/nq
-$ cd raw_data/nq
-$ wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-dev.json.gz
-$ gzip -d biencoder-nq-dev.json.gz
-$ wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-train.json.gz
-$ gzip -d biencoder-nq-train.json.gz
+mkdir -p raw_data/nq
+cd raw_data/nq
+wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-dev.json.gz
+gzip -d biencoder-nq-dev.json.gz
+wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-train.json.gz
+gzip -d biencoder-nq-train.json.gz
 
 # Download TriviaQA
-$ cd ..
-$ mkdir -p trivia
-$ cd trivia
-$ wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-trivia-dev.json.gz
-$ gzip -d biencoder-trivia-dev.json.gz
-$ wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-trivia-train.json.gz
-$ gzip -d biencoder-trivia-train.json.gz
+cd ..
+mkdir -p trivia
+cd trivia
+wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-trivia-dev.json.gz
+gzip -d biencoder-trivia-dev.json.gz
+wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-trivia-train.json.gz
+gzip -d biencoder-trivia-train.json.gz
 
 # Download SQuAD
-$ cd ..
-$ mkdir -p squad
-$ cd squad
-$ wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-squad1-dev.json.gz
-$ gzip -d biencoder-squad1-dev.json.gz
-$ wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-squad1-train.json.gz
-$ gzip -d biencoder-squad1-train.json.gz
+cd ..
+mkdir -p squad
+cd squad
+wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-squad1-dev.json.gz
+gzip -d biencoder-squad1-dev.json.gz
+wget https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-squad1-train.json.gz
+gzip -d biencoder-squad1-train.json.gz
 
 # Download Wiki passages. For the singe-hop datasets, we use the Wikipedia as the document corpus.
-$ cd ..
-$ mkdir -p wiki
-$ cd wiki
-$ wget https://dl.fbaipublicfiles.com/dpr/wikipedia_split/psgs_w100.tsv.gz
-$ gzip -d psgs_w100.tsv.gz
+cd ..
+mkdir -p wiki
+cd wiki
+wget https://dl.fbaipublicfiles.com/dpr/wikipedia_split/psgs_w100.tsv.gz
+gzip -d psgs_w100.tsv.gz
 
 # Process raw data files in a single standard format
-$ python ./processing_scripts/process_nq.py
-$ python ./processing_scripts/process_trivia.py
-$ python ./processing_scripts/process_squad.py
+python ./processing_scripts/process_nq.py
+python ./processing_scripts/process_trivia.py
+python ./processing_scripts/process_squad.py
 
 # Subsample the processed datasets
-$ python processing_scripts/subsample_dataset_and_remap_paras.py {dataset_name} test 500 # nq, trivia, squad
-$ python processing_scripts/subsample_dataset_and_remap_paras.py {dataset_name} dev_diff_size 500 # nq, trivia, squad
+python processing_scripts/subsample_dataset_and_remap_paras.py {dataset_name} test 500 # nq, trivia, squad
+python processing_scripts/subsample_dataset_and_remap_paras.py {dataset_name} dev_diff_size 500 # nq, trivia, squad
 
 # Build index 
-$ python retriever_server/build_index.py wiki
+python retriever_server/build_index.py wiki
 ```
 
 You can ensure that dev and test sets do not overlap, with the code below.
 ```bash
-$ python processing_scripts/check_duplicate.py {dataset_name} # nq, trivia, squad hotpotqa, 2wikimultihopqa, musique
+python processing_scripts/check_duplicate.py {dataset_name} # nq, trivia, squad hotpotqa, 2wikimultihopqa, musique
 ```
 We provide the preprocessed datasets in [`processed_data.tar.gz`](./processed_data.tar.gz).
 
@@ -114,6 +193,8 @@ Next, if you want to use FLAN-T5 series models, start the llm_server (for flan-t
 ```bash
 MODEL_NAME={model_name} uvicorn serve:app --port 8010 --app-dir llm_server # model_name: flan-t5-xxl, flan-t5-xl
 ```
+
+If you want to use **OpenAI** instead, you do not need `llm_server`; export `OPENAI_API_KEY` and choose `MODEL=gpt` in the run scripts below.
 
 ## Run Three Different Retrieval Strategies
 Now, let's run three different retrieval strategies: multi, single, and zero, on the dev set, which will later be used as the training set for training a classifier.
@@ -181,6 +262,60 @@ Finally, you are able to evaluate the QA performance of our Adaptive-RAG (based 
 ```bash
 python ./evaluate_final_acc.py
 ```
+
+## AdaptiveRAG+ pipeline (4-way + LongBench class-D global retrieval)
+
+This repo also includes a newer **AdaptiveRAG+** path driven by:
+
+- `scripts/build_longbench_index.py`: builds (and **resumes**) the LongBench class-D global retrieval indexes under `cache/longbench_index/`.
+- `scripts/run_pipelines_4x4_plus.py`: runs multiple pipelines across QA datasets + LongBench and writes a consolidated report.
+
+### 1) Build / resume LongBench indexes (required)
+
+This step may call OpenAI (embeddings + summaries). It is **safe to re-run**: progress is checkpointed and the script resumes.
+
+```bash
+export OPENAI_API_KEY="YOUR_API_KEY"
+python scripts/build_longbench_index.py
+```
+
+Useful variants:
+
+```bash
+# Check status without doing work (no OpenAI calls).
+python scripts/build_longbench_index.py --status
+
+# Cheap smoke-style index build.
+python scripts/build_longbench_index.py --records-per-dataset 5 --num-clusters 3
+
+# Polite throttle for lower rate limits.
+python scripts/build_longbench_index.py --inter-request-pause 0.5
+```
+
+### 2) Run the AdaptiveRAG+ orchestrator
+
+The orchestrator **expects the LongBench indexes to exist**. If an index is missing, it exits with the exact command to run to build it.
+
+```bash
+# Fast end-to-end smoke run (small D slice + short classifier sweep).
+python scripts/run_pipelines_4x4_plus.py --smoke-test
+
+# Full run (larger D slice + longer classifier sweep).
+python scripts/run_pipelines_4x4_plus.py --full-run
+```
+
+Outputs are written under `./reports/<timestamp>_plus_<mode>/` by default, including:
+
+- `pipeline_results_grouped.md` / `pipeline_results_grouped.csv`
+- `classifier_sweep_summary.json`
+- `pipeline_results_provenance.json`
+- `pipeline_results_notes.md`
+
+### Common failure modes
+
+- **Missing `OPENAI_API_KEY`**: required for indexing and any OpenAI-backed inference in AdaptiveRAG+.
+- **Elasticsearch not running**: required for the original paper retriever flow (`retriever_server`). (AdaptiveRAG+ LongBench indexing does not use Elasticsearch; it uses its own cache under `cache/longbench_index/`.)
+- **CUDA issues for FLAN-T5**: the `llm_server` path is GPU-oriented; use `MODEL=gpt` if you want an API-backed run instead.
 
 ## Acknowledgement
 We refer to the repository of [IRCoT](https://github.com/StonyBrookNLP/ircot) as a skeleton code.
